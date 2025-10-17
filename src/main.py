@@ -9,7 +9,7 @@ PITCH_MAP = [
     ['cc', 'cc#', 'dd', 'dd#', 'ee', 'ff', 'ff#', 'gg', 'gg#', 'aa', 'aa#', 'bb']
 ]
 
-with open("fileExample.json", "r", encoding="utf-8") as f:
+with open("Hooktheory.json", "r") as f:
     data = json.load(f)
 
 song_id = list(data.keys())[0]
@@ -24,7 +24,7 @@ print("!!!voices: 2")
 
 # === 谱表 ==
 print("**kern\t**mxhm")
-print("*clef:G2\t*")
+print("*clefG2\t*")
 
 '''
 # === Alignment & Tempo ===
@@ -53,8 +53,17 @@ print(f"*k[{''.join(PITCH_MAP[2][p] for p in scale if p in {1, 3, 6, 8, 10})}]\t
 
 # === 拍号 ===
 print(f"*M{meter['beats_per_bar']}/{meter['beat_unit']}\t*")
+BEATS_PER_BAR = meter["beats_per_bar"]
+BEAT_UNITS = meter["beat_unit"]
 
 # === 计算节拍长度 ===
+'''for n in song["annotations"]["melody"]:
+    # duration
+    gap = 10
+    onset, offset = n["onset"], n["offset"]
+    if gap > offset - onset:
+        gap = offset - onset'''
+
 def beat_to_duration(beat_len):
     """将拍长转换为 Humdrum 记号"""
     mapping = {2: "2", 1: "4", 0.5: "8", 0.25: "16"}
@@ -71,21 +80,52 @@ def parse_melody(song_data):
     :param song_data:
     :return: melodydic[onset, name]
     """
+    current_time = float(0)
+    current_bar = 1
+    current_bar_time = 0.0
+    bar_time = 1
     melody = song["annotations"]["melody"]
-    lines = []
+    lines = [["=1", "=1"]]
+
     for n in melody:
-        # duration
-        onset, offset = n["onset"], n["offset"]
-        dur = offset - onset
-        dur_code = beat_to_duration(dur)
+        # 检查是否需要休符
+        if n["onset"] > current_time:
+            dur = n["onset"] - current_time
+            dur_code = beat_to_duration(dur)
+            lines.append([current_time, f"{dur_code}r"])
+            current_bar_time += dur
+
+        # 检查小节是否需要增加
+        if current_bar_time >= 4:
+            current_bar_time = current_bar_time % 4
+            current_bar += 1
+            lines.append([f"={current_bar}", f"={current_bar}"])
+
 
         # Note
         pc = n["pitch_class"]
         oct = n["octave"] + 2
         note_name = PITCH_MAP[oct][pc]
 
-        #lines.append({"onset": onset, "duration": dur, "token": f"{dur_code}{note_name}"})
-        lines.append([onset, dur, f"{dur_code}{note_name}"])
+        # duration
+        onset, offset = n["onset"], n["offset"]
+        dur = offset - onset
+
+        # 检查是否需要连音，即出现跨小节
+        if onset  < current_bar * BEATS_PER_BAR < offset:
+            last = current_bar * BEATS_PER_BAR - onset
+            lines.append([onset, f"[{beat_to_duration(last)}{note_name}"])
+            current_bar += 1
+            lines.append([f"={current_bar}", f"={current_bar}"])
+            lines.append([(current_bar - 1) * BEATS_PER_BAR, f"{beat_to_duration(dur - last)}{note_name}]"])
+            current_bar_time = dur - last
+
+        else:
+            dur_code = beat_to_duration(dur)
+            lines.append([onset, f"{dur_code}{note_name}"])
+            current_bar_time += dur
+
+        current_time = n["offset"]
 
     return lines
 
@@ -109,76 +149,48 @@ def chord_name(chord):
         suffix = "?"
 
     if suffix:
-        return root + ":" + suffix
+        return root + suffix
     else:
         return root
 
 # === 和弦解析 ===
 def parse_harmony(song_data):
     harmony = song_data["annotations"]["harmony"]
-    chords = []
+    chords = dict()
     for h in harmony:
-        onset = h["onset"]
+        onset = float(h["onset"])
         offset = h["offset"]
         dur = offset - onset
         name = chord_name(h)
         #chords.append({"onset": onset, "duration": dur, "token": name})
-        chords.append([onset, dur, name])
+        chords[onset] = name
     return chords
 
-
-def combine_melody_harmony(melody_list, harmony_list, beats_per_bar=4):
+# === 生成 ===
+def combine_melody_harmony(melody_list, harmony_list, beats_per_bar=4, resolution=0.25):
     """双指针合成，自动小节划分"""
-    time = 0.0
-    bar_accum = 0.0
-
-    i, j = 0, 0
-    active_chord = None
     lines = []
 
-    while i < len(melody_list) or j < len(harmony_list):
-        # 更新当前和弦
-        if j < len(harmony_list):
-            onset_h, dur_h, chord_code = harmony_list[j]
-            if time >= onset_h:
-                active_chord = chord_code
-            if time >= onset_h + dur_h:
-                j += 1
-                if j < len(harmony_list):
-                    active_chord = harmony_list[j][2]
-
-        # 输出旋律事件
-        if i < len(melody_list):
-            onset_m, dur_m, note_code = melody_list[i]
-            if abs(time - onset_m) < 1e-6:  # 当前时间有音符开始
-                lines.append(f"{note_code}\t{active_chord or '.'}")
-                time += dur_m
-                bar_accum += dur_m
-                i += 1
+    for m in melody_list:
+        if type(m[0]) != str:
+            if m[0] in harmony_list:
+                lines.append(f"{m[1]}\t{harmony_list[m[0]]}")
             else:
-                # 若当前时间无旋律事件，推进到下个onset
-                next_onset = melody_list[i][0]
-                step = next_onset - time
-                time += step
-                bar_accum += step
+                lines.append(f"{m[1]}\t.")
         else:
-            break
-
-        # 检查是否该换小节
-        if bar_accum >= beats_per_bar - 1e-6:
-            lines.append("=\t=")
-            bar_accum = 0.0
+            lines.append(f"{m[0]}\t{m[0]}")
 
     lines.append("*–\t*–")
-
     return "\n".join(lines)
-# === 生成 ===
+
 #def to_humdrum(song_data):
 
 
 
 melody_output = parse_melody(song)
 harmony_output = parse_harmony(song)
+#print(melody_output)
+#print(harmony_output)
 print(combine_melody_harmony(melody_output, harmony_output))
 
 '''melody = song["annotations"]["melody"]
