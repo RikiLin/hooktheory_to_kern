@@ -1,13 +1,7 @@
 import json
-from pprint import pprint
-import statistics
-
-PITCH_MAP = [
-    ['CC', 'CC#', 'DD', 'DD#', 'EE', 'FF', 'FF#', 'GG', 'GG#', 'AA', 'AA#', 'BB'],
-    ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'], # < C4
-    ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'], # >= C4
-    ['cc', 'cc#', 'dd', 'dd#', 'ee', 'ff', 'ff#', 'gg', 'gg#', 'aa', 'aa#', 'bb']
-]
+from melody import *
+from harmony import *
+from beaming import *
 
 with open("Hooktheory.json", "r") as f:
     data = json.load(f)
@@ -17,25 +11,15 @@ song = data[song_id]
 
 # === 基础信息 ===
 info = song["hooktheory"]
-print(f"!!!COM: {info['artist']}")
-print(f"!!!OPR@@DE: {info['song']}")
-print("!!!OPR@EN: Youtube")
-print("!!!voices: 2")
+head = [
+    f"!!!COM: {info['artist']}",
+    f"!!!OPR@@DE: {info['song']}",
+    "!!!OPR@EN: Youtube", "!!!voices: 2",
+    "**kern\t**mxhm",
+    "*clefG2\t*"
+]
 
 # === 谱表 ==
-print("**kern\t**mxhm")
-print("*clefG2\t*")
-
-'''
-# === Alignment & Tempo ===
-align = song["alignment"]
-beats = align["refined"]["beats"]
-times = align["refined"]["times"]
-beat_durations = [t2 - t1 for t1, t2 in zip(times[:-1], times[1:])]
-avg_tempo = 60 / (sum(beat_durations) / len(beat_durations))
-print(f"Tempo ≈ {avg_tempo:.1f} BPM")
-'''
-
 meter = song["annotations"]["meters"][0]
 key = song["annotations"]["keys"][0]
 
@@ -49,125 +33,22 @@ def get_scale_map(tonic_pitch_class, scale_intervals):
 tonic_pc = key["tonic_pitch_class"]  # D major
 intervals = key["scale_degree_intervals"]
 scale = get_scale_map(tonic_pc, intervals)
-print(f"*k[{''.join(PITCH_MAP[2][p] for p in scale if p in {1, 3, 6, 8, 10})}]\t*")
+head.append(f"*k[{''.join(PITCH_MAP[2][p] for p in scale if p in {1, 3, 6, 8, 10})}]\t*")
 
 # === 拍号 ===
-print(f"*M{meter['beats_per_bar']}/{meter['beat_unit']}\t*")
-BEATS_PER_BAR = meter["beats_per_bar"]
-BEAT_UNITS = meter["beat_unit"]
-
-# === 计算节拍长度 ===
-'''for n in song["annotations"]["melody"]:
-    # duration
-    gap = 10
-    onset, offset = n["onset"], n["offset"]
-    if gap > offset - onset:
-        gap = offset - onset'''
-
-def beat_to_duration(beat_len):
-    """将拍长转换为 Humdrum 记号"""
-    mapping = {2: "2", 1: "4", 0.5: "8", 0.25: "16"}
-    # 匹配不到时，选择最接近的
-    dur = min(mapping.keys(), key=lambda x: abs(x - beat_len))
-    return mapping[dur]
+beats_per_bar = meter["beats_per_bar"]
+beat_unit = meter["beat_unit"]
+head.append(f"*M{beats_per_bar}/{meter['beat_unit']}\t*")
 
 # === Melody ===
-
-# === 旋律解析 ===
-def parse_melody(song_data):
-    """
-    传入需要处理的歌曲数据，返回一个带有时间标记的可用记号
-    :param song_data:
-    :return: melodydic[onset, name]
-    """
-    current_time = float(0)
-    current_bar = 1
-    current_bar_time = 0.0
-    bar_time = 1
-    melody = song["annotations"]["melody"]
-    lines = [["=1", "=1"]]
-
-    for n in melody:
-        # 检查是否需要休符
-        if n["onset"] > current_time:
-            dur = n["onset"] - current_time
-            dur_code = beat_to_duration(dur)
-            lines.append([current_time, f"{dur_code}r"])
-            current_bar_time += dur
-
-        # 检查小节是否需要增加
-        if current_bar_time >= 4:
-            current_bar_time = current_bar_time % 4
-            current_bar += 1
-            lines.append([f"={current_bar}", f"={current_bar}"])
-
-
-        # Note
-        pc = n["pitch_class"]
-        oct = n["octave"] + 2
-        note_name = PITCH_MAP[oct][pc]
-
-        # duration
-        onset, offset = n["onset"], n["offset"]
-        dur = offset - onset
-
-        # 检查是否需要连音，即出现跨小节
-        if onset  < current_bar * BEATS_PER_BAR < offset:
-            last = current_bar * BEATS_PER_BAR - onset
-            lines.append([onset, f"[{beat_to_duration(last)}{note_name}"])
-            current_bar += 1
-            lines.append([f"={current_bar}", f"={current_bar}"])
-            lines.append([(current_bar - 1) * BEATS_PER_BAR, f"{beat_to_duration(dur - last)}{note_name}]"])
-            current_bar_time = dur - last
-
-        else:
-            dur_code = beat_to_duration(dur)
-            lines.append([onset, f"{dur_code}{note_name}"])
-            current_bar_time += dur
-
-        current_time = n["offset"]
-
-    return lines
+melody_output = parse_melody(song, beats_per_bar)
+melody_output = note_beaming(melody_output)
 
 # === Harmony ===
-
-# === 计算和弦 ===
-def chord_name(chord):
-    root_pc = chord["root_pitch_class"]
-    root_intervals = chord["root_position_intervals"]
-    root = PITCH_MAP[1][root_pc]
-
-    if root_intervals == [4, 3]:
-        suffix = ""
-    elif root_intervals == [3, 4]:
-        suffix = "m"
-    elif root_intervals == [3, 3]:
-        suffix = "dim"
-    elif root_intervals == [4, 4]:
-        suffix = "aug"
-    else:
-        suffix = "?"
-
-    if suffix:
-        return root + suffix
-    else:
-        return root
-
-# === 和弦解析 ===
-def parse_harmony(song_data):
-    harmony = song_data["annotations"]["harmony"]
-    chords = dict()
-    for h in harmony:
-        onset = float(h["onset"])
-        offset = h["offset"]
-        dur = offset - onset
-        name = chord_name(h)
-        #chords.append({"onset": onset, "duration": dur, "token": name})
-        chords[onset] = name
-    return chords
+harmony_output = parse_harmony(song)
 
 # === 生成 ===
-def combine_melody_harmony(melody_list, harmony_list, beats_per_bar=4, resolution=0.25):
+def combine_melody_harmony(melody_list, harmony_list):
     """双指针合成，自动小节划分"""
     lines = []
 
@@ -183,28 +64,9 @@ def combine_melody_harmony(melody_list, harmony_list, beats_per_bar=4, resolutio
     lines.append("*–\t*–")
     return "\n".join(lines)
 
-#def to_humdrum(song_data):
+head = "\n".join(head)
+sheet = combine_melody_harmony(melody_output, harmony_output)
 
-
-
-melody_output = parse_melody(song)
-harmony_output = parse_harmony(song)
-#print(melody_output)
-#print(harmony_output)
-print(combine_melody_harmony(melody_output, harmony_output))
-
-'''melody = song["annotations"]["melody"]
-print(f"旋律音符总数: {len(melody)}")
-print("前10个音符:")
-for n in melody[:10]:
-    onset, offset = n["onset"], n["offset"]
-    dur = offset - onset
-    pc = n["pitch_class"]
-    oct = n["octave"] + 2
-    name = PITCH_MAP[oct][pc]
-    print(f"  起拍={onset:<5} 终拍={offset:<5} 时值={dur:<4} 音名={name}")
-
-durations = [n["offset"] - n["onset"] for n in melody]
-pitch_classes = [n["pitch_class"] for n in melody]
-print(f"平均音长: {statistics.mean(durations):.2f} 拍")
-print(f"音阶集合: {sorted({PITCH_MAP[p] for p in pitch_classes})}")'''
+with open("output.txt", "w", encoding="utf-8") as f:
+    f.write(head + "\n")  # 第一行
+    f.write(sheet)
